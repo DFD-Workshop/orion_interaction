@@ -1,0 +1,2 @@
+string action_type
+string payload_json
