@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'audio_capture = orion_audio.audio_capture_node:main',
+            'vad = orion_audio.vad_node:main',
         ],
     },
 )
