@@ -11,7 +11,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'httpx'],
     zip_safe=True,
     maintainer='DanielFLopez1620',
     maintainer_email='dfelipe.lopez@gmail.com',
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'llm_node = orion_llm.llm_node:main',
         ],
     },
 )
