@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='DanielFLopez1620',
     maintainer_email='dfelipe.lopez@gmail.com',
-    description='TODO: Package description',
+    description='Text-to-Speech node with interchangeable backends for orion_interaction',
     license='BSD-3-Clause',
     extras_require={
         'test': [
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'tts = orion_tts.tts_node:main',
         ],
     },
 )

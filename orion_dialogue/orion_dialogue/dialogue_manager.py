@@ -10,7 +10,7 @@ import yaml
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
-from orion_interfaces.msg import AssistantResponse, UserInput
+from orion_interfaces.msg import AssistantResponse, TTSRequest, UserInput
 from orion_interfaces.srv import LLMChat
 
 _CONTEXT_SECTIONS = ('persona', 'background', 'environment', 'capabilities', 'guidelines')
@@ -41,11 +41,14 @@ class DialogueManager(Node):
         self.declare_parameter('context_file', '')
         self.declare_parameter('system_prompt', 'Eres ORION, un robot asistente amigable.')
         self.declare_parameter('max_history', 20)
+        self.declare_parameter('tts_voice', '')
 
         context_file: str = self.get_parameter('context_file').value
         fallback: str = self.get_parameter('system_prompt').value
         self._system_prompt: str = _load_system_prompt(context_file, fallback)
         self._max_history: int = self.get_parameter('max_history').value
+        # Empty voice -> orion_tts falls back to its own default voice
+        self._tts_voice: str = self.get_parameter('tts_voice').value
 
         if context_file:
             self.get_logger().info(f'System prompt loaded from: {context_file}')
@@ -58,6 +61,7 @@ class DialogueManager(Node):
         qos = QoSProfile(depth=10)
         self.create_subscription(UserInput, '/dialogue/user_input', self._input_cb, qos)
         self._pub = self.create_publisher(AssistantResponse, '/dialogue/assistant_response', qos)
+        self._tts_pub = self.create_publisher(TTSRequest, '/tts/speak', qos)
         self._llm_client = self.create_client(LLMChat, '/llm/request')
 
         self._queue: asyncio.Queue[UserInput] = asyncio.Queue()
@@ -141,6 +145,9 @@ class DialogueManager(Node):
                 is_streaming=False,
             )
             self._pub.publish(pub_msg)
+
+            # Close the voice loop: hand the response to orion_tts to speak.
+            self._tts_pub.publish(TTSRequest(text=response_text, voice=self._tts_voice))
             self.get_logger().info(f'[ORION] "{response_text[:100]}..."')
 
     def run(self) -> None:
