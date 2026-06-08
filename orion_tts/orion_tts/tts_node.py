@@ -29,10 +29,17 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
+# Markdown markup omission
+_MD_LINK_RE = re.compile(r'\[([^\]]+)\]\([^)]+\)')  # [text](url) -> text
+_MD_CHARS_RE = re.compile(r'[*_`#>~]')              # emphasis/code/heading/quote/strike
+
 
 def _sanitize(text: str) -> str:
-    """Remove emojis/pictographs and collapse the leftover whitespace."""
-    return re.sub(r'\s+', ' ', _EMOJI_RE.sub('', text)).strip()
+    """Strip emojis and markdown markup, then collapse leftover whitespace."""
+    text = _EMOJI_RE.sub('', text)
+    text = _MD_LINK_RE.sub(r'\1', text)
+    text = _MD_CHARS_RE.sub('', text)
+    return re.sub(r'\s+', ' ', text).strip()
 
 
 class TTSNode(Node):
@@ -100,7 +107,10 @@ class TTSNode(Node):
 
             self.get_logger().info(f'[TTS] "{text}"')
             # Playback is blocking — run it off the event loop, serialized by the queue.
-            await loop.run_in_executor(None, self._play, audio, sample_rate)
+            try:
+                await loop.run_in_executor(None, self._play, audio, sample_rate)
+            except Exception as exc:
+                self.get_logger().error(f'Playback error: {exc}')
 
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()

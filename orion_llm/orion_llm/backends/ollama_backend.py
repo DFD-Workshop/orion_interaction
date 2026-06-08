@@ -14,6 +14,7 @@ class OllamaBackend(LLMBackend):
         self._model: str = config.get('model', 'gemma3:12b')
         self._stream: bool = config.get('stream', True)
         self._max_tokens: int = config.get('max_tokens', 1024)
+        self._num_ctx: int = config.get('num_ctx', 8192)
         self._base_url = f'http://{self._host}'
 
     def is_available(self) -> bool:
@@ -34,7 +35,7 @@ class OllamaBackend(LLMBackend):
             'model': self._model,
             'messages': messages,
             'stream': stream,
-            'options': {'num_predict': self._max_tokens},
+            'options': {'num_predict': self._max_tokens, 'num_ctx': self._num_ctx},
         }
         if tools:
             payload['tools'] = tools

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import rclpy
 from rclpy.node import Node
@@ -17,13 +18,16 @@ class LLMNode(Node):
         super().__init__('llm')
 
         self.declare_parameter('backend', 'ollama')
-        self.declare_parameter('model', 'gemma3:12b')
+        self.declare_parameter('model', 'qwen2.5:7b')
         self.declare_parameter('host', 'localhost:11434')
         self.declare_parameter('stream', True)
-        self.declare_parameter('max_tokens', 1024)
+        self.declare_parameter('max_tokens', 200)
+        self.declare_parameter('num_ctx', 8192)
         self.declare_parameter('system_prompt', '')
+        self.declare_parameter('request_timeout', 200.0)
 
         self._system_prompt: str = self.get_parameter('system_prompt').value
+        self._request_timeout: float = self.get_parameter('request_timeout').value
         self._stream: bool = self.get_parameter('stream').value
 
         backend_name: str = self.get_parameter('backend').value
@@ -32,6 +36,7 @@ class LLMNode(Node):
             'host': self.get_parameter('host').value,
             'stream': self._stream,
             'max_tokens': self.get_parameter('max_tokens').value,
+            'num_ctx': self.get_parameter('num_ctx').value,
         }
         self._backend: LLMBackend = get_backend(backend_name, config)
 
@@ -59,10 +64,18 @@ class LLMNode(Node):
             self._run_chat(request), self._loop
         )
         try:
-            return future.result(timeout=120.0)
+            return future.result(timeout=self._request_timeout)
+        except FutureTimeoutError:
+            future.cancel()
+            response.success = False
+            response.error_msg = (
+                f'LLM request timed out after {self._request_timeout:.0f}s '
+                '(model too slow or still loading)'
+            )
+            return response
         except Exception as exc:
             response.success = False
-            response.error_msg = str(exc)
+            response.error_msg = str(exc) or repr(exc)
             return response
 
     async def _run_chat(self, request: LLMChat.Request) -> LLMChat.Response:

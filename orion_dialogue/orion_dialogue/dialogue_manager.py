@@ -42,20 +42,22 @@ class DialogueManager(Node):
         self.declare_parameter('system_prompt', 'Eres ORION, un robot asistente amigable.')
         self.declare_parameter('max_history', 20)
         self.declare_parameter('tts_voice', '')
+        self.declare_parameter(
+            'reply_suffix', '(Máximo 2 oraciones, solo texto plano.)'
+        )
 
         context_file: str = self.get_parameter('context_file').value
         fallback: str = self.get_parameter('system_prompt').value
         self._system_prompt: str = _load_system_prompt(context_file, fallback)
         self._max_history: int = self.get_parameter('max_history').value
-        # Empty voice -> orion_tts falls back to its own default voice
         self._tts_voice: str = self.get_parameter('tts_voice').value
+        self._reply_suffix: str = self.get_parameter('reply_suffix').value
 
         if context_file:
             self.get_logger().info(f'System prompt loaded from: {context_file}')
         else:
             self.get_logger().info('Using inline system_prompt parameter')
 
-        # Conversation history — alternating user/assistant turns
         self._history: list[dict] = []
 
         qos = QoSProfile(depth=10)
@@ -129,7 +131,11 @@ class DialogueManager(Node):
             if len(self._history) > self._max_history:
                 self._history = self._history[-self._max_history:]
 
-            messages: list[dict] = self._history
+            messages: list[dict] = list(self._history)
+            if self._reply_suffix and messages:
+                last = dict(messages[-1])
+                last['content'] = f'{last["content"]} {self._reply_suffix}'
+                messages[-1] = last
             if self._system_prompt:
                 messages = [{'role': 'system', 'content': self._system_prompt}] + messages
 
@@ -146,7 +152,6 @@ class DialogueManager(Node):
             )
             self._pub.publish(pub_msg)
 
-            # Close the voice loop: hand the response to orion_tts to speak.
             self._tts_pub.publish(TTSRequest(text=response_text, voice=self._tts_voice))
             self.get_logger().info(f'[ORION] "{response_text[:100]}..."')
 
