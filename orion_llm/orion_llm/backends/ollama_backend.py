@@ -5,7 +5,7 @@ from typing import AsyncIterator
 
 import httpx
 
-from orion_llm.backends.base import LLMBackend
+from orion_llm.backends.base import Chunk, LLMBackend
 
 
 class OllamaBackend(LLMBackend):
@@ -30,7 +30,12 @@ class OllamaBackend(LLMBackend):
         messages: list[dict],
         tools: list[dict] | None = None,
         stream: bool = False,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[Chunk]:
+        # Ollama returns tool calls only on non-streamed responses, so when tools
+        # are offered we force a single-shot call and surface them explicitly.
+        if tools:
+            stream = False
+
         payload: dict = {
             'model': self._model,
             'messages': messages,
@@ -52,11 +57,28 @@ class OllamaBackend(LLMBackend):
                         chunk = json.loads(line)
                         delta = chunk.get('message', {}).get('content', '')
                         if delta:
-                            yield delta
+                            yield {'type': 'content', 'text': delta}
             else:
                 resp = await client.post(
                     f'{self._base_url}/api/chat', json=payload
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                yield data.get('message', {}).get('content', '')
+                message = resp.json().get('message', {})
+
+                content = message.get('content', '')
+                if content:
+                    yield {'type': 'content', 'text': content}
+
+                for call in message.get('tool_calls', []):
+                    fn = call.get('function', {})
+                    args = fn.get('arguments', {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {}
+                    yield {
+                        'type': 'tool_call',
+                        'name': fn.get('name', ''),
+                        'arguments': args if isinstance(args, dict) else {},
+                    }

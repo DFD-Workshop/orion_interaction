@@ -91,13 +91,31 @@ class LLMNode(Node):
             messages = [{'role': 'system', 'content': self._system_prompt}] + messages
 
         try:
-            chunks: list[str] = []
-            async for chunk in self._backend.chat(messages, stream=self._stream):
-                chunks.append(chunk)
-            response.response = ''.join(chunks)
-            response.tool_calls_json = []
+            tools: list[dict] = [json.loads(t) for t in request.tools_json]
+        except json.JSONDecodeError as exc:
+            response.success = False
+            response.error_msg = f'Invalid tools_json: {exc}'
+            return response
+
+        try:
+            text_parts: list[str] = []
+            tool_calls: list[str] = []
+            async for chunk in self._backend.chat(
+                messages, tools=tools or None, stream=self._stream
+            ):
+                if chunk['type'] == 'content':
+                    text_parts.append(chunk['text'])
+                elif chunk['type'] == 'tool_call':
+                    tool_calls.append(json.dumps(
+                        {'name': chunk['name'], 'arguments': chunk['arguments']}
+                    ))
+            response.response = ''.join(text_parts)
+            response.tool_calls_json = tool_calls
             response.success = True
-            self.get_logger().info(f'[LLM] → "{response.response[:80]}..."')
+            self.get_logger().info(
+                f'[LLM] → "{response.response[:80]}..." '
+                f'(+{len(tool_calls)} tool call(s))'
+            )
         except Exception as exc:
             response.success = False
             response.error_msg = str(exc)

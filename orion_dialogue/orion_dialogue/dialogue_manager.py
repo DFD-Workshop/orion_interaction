@@ -10,8 +10,48 @@ import yaml
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
-from orion_interfaces.msg import AssistantResponse, TTSRequest, UserInput
+from orion_interfaces.msg import ActionCommand, AssistantResponse, TTSRequest, UserInput
 from orion_interfaces.srv import LLMChat
+
+# Tools advertised to the LLM. The model triggers actions by returning a tool call
+# (structured output), never by emitting a magic string for us to match on.
+AVAILABLE_TOOLS: list[dict] = [
+    {
+        'type': 'function',
+        'function': {
+            'name': 'execute_movement',
+            'description': 'Mueve la base del robot en una dirección por una duración.',
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'direction': {
+                        'type': 'string',
+                        'enum': ['forward', 'backward', 'left', 'right'],
+                    },
+                    'duration': {
+                        'type': 'number',
+                        'description': 'Segundos de movimiento.',
+                    },
+                },
+                'required': ['direction'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'stop_movement',
+            'description': 'Detiene inmediatamente la base del robot.',
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    },
+]
+
+# Maps an LLM tool name to the ActionCommand.action_type understood by orion_actions.
+_TOOL_TO_ACTION = {
+    'execute_movement': 'move',
+    'stop_movement': 'stop',
+}
 
 # Canonical ordering for known sections. Any other section present in the YAML is
 # appended afterwards (in file order), so new sections are never silently dropped.
@@ -48,9 +88,7 @@ class DialogueManager(Node):
         self.declare_parameter('system_prompt', 'Eres ORION, un robot asistente amigable.')
         self.declare_parameter('max_history', 20)
         self.declare_parameter('tts_voice', '')
-        self.declare_parameter(
-            'reply_suffix', '(Máximo 2 oraciones, solo texto plano.)'
-        )
+        self.declare_parameter('reply_suffix', '(Máximo 2 oraciones.)')
 
         context_file: str = self.get_parameter('context_file').value
         fallback: str = self.get_parameter('system_prompt').value
@@ -70,6 +108,7 @@ class DialogueManager(Node):
         self.create_subscription(UserInput, '/dialogue/user_input', self._input_cb, qos)
         self._pub = self.create_publisher(AssistantResponse, '/dialogue/assistant_response', qos)
         self._tts_pub = self.create_publisher(TTSRequest, '/tts/speak', qos)
+        self._action_pub = self.create_publisher(ActionCommand, '/actions/command', qos)
         self._llm_client = self.create_client(LLMChat, '/llm/request')
 
         self._queue: asyncio.Queue[UserInput] = asyncio.Queue()
@@ -94,9 +133,10 @@ class DialogueManager(Node):
                 return
             self.get_logger().info('Waiting for /llm/request service...')
 
-    async def _call_llm(self, messages: list[dict]) -> str:
+    async def _call_llm(self, messages: list[dict]) -> tuple[str, list[str]]:
         request = LLMChat.Request()
         request.messages_json = [json.dumps(m) for m in messages]
+        request.tools_json = [json.dumps(t) for t in AVAILABLE_TOOLS]
 
         event = asyncio.Event()
         result: list[LLMChat.Response | None] = [None]
@@ -115,11 +155,11 @@ class DialogueManager(Node):
 
         resp = result[0]
         if resp is None:
-            return ''
+            return '', []
         if not resp.success:
             self.get_logger().error(f'LLM error: {resp.error_msg}')
-            return ''
-        return resp.response
+            return '', []
+        return resp.response, list(resp.tool_calls_json)
 
     async def _process_loop(self) -> None:
         await self._wait_for_llm()
@@ -145,21 +185,50 @@ class DialogueManager(Node):
             if self._system_prompt:
                 messages = [{'role': 'system', 'content': self._system_prompt}] + messages
 
-            response_text = await self._call_llm(messages)
-            if not response_text:
+            response_text, tool_calls = await self._call_llm(messages)
+            if not response_text and not tool_calls:
                 continue
 
-            self._history.append({'role': 'assistant', 'content': response_text})
+            if response_text:
+                self._history.append({'role': 'assistant', 'content': response_text})
 
-            pub_msg = AssistantResponse(
+            self._pub.publish(AssistantResponse(
                 text=response_text,
-                tool_calls_json=[],
+                tool_calls_json=tool_calls,
                 is_streaming=False,
-            )
-            self._pub.publish(pub_msg)
+            ))
 
-            self._tts_pub.publish(TTSRequest(text=response_text, voice=self._tts_voice))
-            self.get_logger().info(f'[ORION] "{response_text[:100]}..."')
+            self._route_tool_calls(tool_calls)
+
+            if response_text:
+                self._tts_pub.publish(
+                    TTSRequest(text=response_text, voice=self._tts_voice)
+                )
+                self.get_logger().info(f'[ORION] "{response_text[:100]}..."')
+
+    def _route_tool_calls(self, tool_calls: list[str]) -> None:
+        """Turn LLM tool calls into ActionCommand messages for orion_actions."""
+        for raw in tool_calls:
+            try:
+                call = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                self.get_logger().error(f'Bad tool call JSON: {exc}')
+                continue
+
+            name = call.get('name', '')
+            action_type = _TOOL_TO_ACTION.get(name)
+            if action_type is None:
+                self.get_logger().warning(f'Unknown tool call: {name!r}')
+                continue
+
+            cmd = ActionCommand(
+                action_type=action_type,
+                payload_json=json.dumps(call.get('arguments', {})),
+            )
+            self._action_pub.publish(cmd)
+            self.get_logger().info(
+                f'[Action] {name} → {action_type} {cmd.payload_json}'
+            )
 
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()

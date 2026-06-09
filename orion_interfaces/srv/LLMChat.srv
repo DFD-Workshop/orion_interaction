@@ -1,4 +1,5 @@
 string[] messages_json
+string[] tools_json
 ---
 string response
 string[] tool_calls_json
