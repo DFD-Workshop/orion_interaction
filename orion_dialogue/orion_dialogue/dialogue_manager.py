@@ -13,7 +13,11 @@ from rclpy.qos import QoSProfile
 from orion_interfaces.msg import AssistantResponse, TTSRequest, UserInput
 from orion_interfaces.srv import LLMChat
 
-_CONTEXT_SECTIONS = ('persona', 'background', 'environment', 'capabilities', 'guidelines')
+# Canonical ordering for known sections. Any other section present in the YAML is
+# appended afterwards (in file order), so new sections are never silently dropped.
+_CONTEXT_SECTIONS = (
+    'output_rules', 'persona', 'background', 'environment', 'capabilities', 'guidelines'
+)
 
 
 def _load_system_prompt(context_file: str, fallback: str) -> str:
@@ -30,8 +34,10 @@ def _load_system_prompt(context_file: str, fallback: str) -> str:
     if not isinstance(data, dict):
         return fallback
 
-    parts = [str(data[s]).strip() for s in _CONTEXT_SECTIONS if s in data]
-    return '\n\n'.join(parts)
+    ordered = [s for s in _CONTEXT_SECTIONS if s in data]
+    extras = [k for k in data if k not in _CONTEXT_SECTIONS]
+    parts = [str(data[k]).strip() for k in (*ordered, *extras) if str(data[k]).strip()]
+    return '\n\n'.join(parts) if parts else fallback
 
 
 class DialogueManager(Node):
