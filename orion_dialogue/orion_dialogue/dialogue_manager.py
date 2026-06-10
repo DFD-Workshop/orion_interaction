@@ -176,6 +176,11 @@ class DialogueManager(Node):
 
             if len(self._history) > self._max_history:
                 self._history = self._history[-self._max_history:]
+                # Never start the window on an orphaned 'tool' result (a tool
+                # message must follow the assistant tool_call that produced it),
+                # or Ollama rejects the request.
+                while self._history and self._history[0]['role'] == 'tool':
+                    self._history.pop(0)
 
             messages: list[dict] = list(self._history)
             if self._reply_suffix and messages:
@@ -189,8 +194,7 @@ class DialogueManager(Node):
             if not response_text and not tool_calls:
                 continue
 
-            if response_text:
-                self._history.append({'role': 'assistant', 'content': response_text})
+            self._record_history(response_text, tool_calls)
 
             self._pub.publish(AssistantResponse(
                 text=response_text,
@@ -205,6 +209,37 @@ class DialogueManager(Node):
                     TTSRequest(text=response_text, voice=self._tts_voice)
                 )
                 self.get_logger().info(f'[ORION] "{response_text[:100]}..."')
+
+    def _record_history(self, response_text: str, tool_calls: list[str]) -> None:
+        """Append the assistant turn using the native tool-call protocol.
+
+        The assistant message carries the structured tool_calls (not free text),
+        and each call is followed by a 'tool' result message. This keeps the
+        history well-formed without feeding back narration text the model would
+        otherwise imitate instead of actually calling the tool.
+        """
+        parsed: list[dict] = []
+        for raw in tool_calls:
+            try:
+                parsed.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+
+        assistant_msg: dict = {'role': 'assistant', 'content': response_text}
+        if parsed:
+            assistant_msg['tool_calls'] = [
+                {'function': {'name': c.get('name', ''),
+                              'arguments': c.get('arguments', {})}}
+                for c in parsed
+            ]
+        self._history.append(assistant_msg)
+
+        for c in parsed:
+            self._history.append({
+                'role': 'tool',
+                'tool_name': c.get('name', ''),
+                'content': 'ok',
+            })
 
     def _route_tool_calls(self, tool_calls: list[str]) -> None:
         """Turn LLM tool calls into ActionCommand messages for orion_actions."""

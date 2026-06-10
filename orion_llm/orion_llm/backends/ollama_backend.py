@@ -15,6 +15,9 @@ class OllamaBackend(LLMBackend):
         self._stream: bool = config.get('stream', True)
         self._max_tokens: int = config.get('max_tokens', 1024)
         self._num_ctx: int = config.get('num_ctx', 8192)
+        # Ollama defaults to 0.8, which makes tool calling flaky (the model
+        # sometimes narrates instead of emitting the call). Keep it low.
+        self._temperature: float = config.get('temperature', 0.2)
         self._base_url = f'http://{self._host}'
 
     def is_available(self) -> bool:
@@ -40,7 +43,11 @@ class OllamaBackend(LLMBackend):
             'model': self._model,
             'messages': messages,
             'stream': stream,
-            'options': {'num_predict': self._max_tokens, 'num_ctx': self._num_ctx},
+            'options': {
+                'num_predict': self._max_tokens,
+                'num_ctx': self._num_ctx,
+                'temperature': self._temperature,
+            },
         }
         if tools:
             payload['tools'] = tools

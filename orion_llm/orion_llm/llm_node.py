@@ -23,6 +23,7 @@ class LLMNode(Node):
         self.declare_parameter('stream', True)
         self.declare_parameter('max_tokens', 200)
         self.declare_parameter('num_ctx', 8192)
+        self.declare_parameter('temperature', 0.2)
         self.declare_parameter('system_prompt', '')
         self.declare_parameter('request_timeout', 200.0)
 
@@ -37,6 +38,7 @@ class LLMNode(Node):
             'stream': self._stream,
             'max_tokens': self.get_parameter('max_tokens').value,
             'num_ctx': self.get_parameter('num_ctx').value,
+            'temperature': self.get_parameter('temperature').value,
         }
         self._backend: LLMBackend = get_backend(backend_name, config)
 
