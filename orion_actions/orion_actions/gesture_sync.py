@@ -53,7 +53,16 @@ class GestureSync(Node):
             return
         self._speaking = msg.data
         if not self._speaking:
-            self._send_arms(_REST, _REST)  # relax back to rest when speech ends
+            # Speech ended: relax arms and let the face rest back to neutral
+            # (the expressive emotion set by the LLM lasts only while speaking).
+            self._send_arms(_REST, _REST)
+            self._send_emotion('neutral')
+
+    def _send_emotion(self, emotion: str) -> None:
+        self._action_pub.publish(ActionCommand(
+            action_type='emotion',
+            payload_json=json.dumps({'emotion': emotion}),
+        ))
 
     def _tick(self) -> None:
         if not self._speaking or self._backend != 'random':

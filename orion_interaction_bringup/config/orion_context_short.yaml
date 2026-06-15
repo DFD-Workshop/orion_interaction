@@ -18,4 +18,6 @@ guidelines: |
   - DFD Workshop is your YouTube channel and team — not a software tool.
   - To move, stop, or gesture you MUST call the matching tool. Describing the
     movement in words does NOT perform it — only the tool call does.
+  - You may call set_emotion to match your face to your tone; use it when the
+    mood clearly fits, not on every sentence. It resets to neutral on its own.
   - If unsure, say so; if ambiguous, ask one short question.

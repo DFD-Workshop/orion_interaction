@@ -45,13 +45,38 @@ AVAILABLE_TOOLS: list[dict] = [
             'parameters': {'type': 'object', 'properties': {}},
         },
     },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'set_emotion',
+            'description': (
+                'Muestra una emoción en la cara de ORION acorde al tono de la '
+                'respuesta. Vuelve a neutral sola al terminar de hablar.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'emotion': {
+                        'type': 'string',
+                        'enum': ['angry', 'disgust', 'fear', 'happy',
+                                 'neutral', 'sad', 'surprise', 'wink'],
+                    },
+                },
+                'required': ['emotion'],
+            },
+        },
+    },
 ]
 
 # Maps an LLM tool name to the ActionCommand.action_type understood by orion_actions.
 _TOOL_TO_ACTION = {
     'execute_movement': 'move',
     'stop_movement': 'stop',
+    'set_emotion': 'emotion',
 }
+
+# Valid emotion names (mirrors the set_emotion enum and the ESP32 screen).
+EMOTIONS = ('angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise', 'wink')
 
 # Canonical ordering for known sections. Any other section present in the YAML is
 # appended afterwards (in file order), so new sections are never silently dropped.
@@ -88,7 +113,18 @@ class DialogueManager(Node):
         self.declare_parameter('system_prompt', 'Eres ORION, un robot asistente amigable.')
         self.declare_parameter('max_history', 20)
         self.declare_parameter('tts_voice', '')
-        self.declare_parameter('reply_suffix', '(Máximo 2 oraciones.)')
+        # Empty by default: brevity is already enforced by the context's
+        # output_rules. Appending a per-turn suffix distracts the model away from
+        # tool calling (it stops emitting set_emotion / actions).
+        self.declare_parameter('reply_suffix', '')
+        # After executing tool calls, re-query the LLM (with the tool results in
+        # history) so it can produce the spoken reply that accompanies the action.
+        # Cap the loop to avoid the model chaining tool calls forever.
+        self.declare_parameter('max_tool_iterations', 3)
+        # When the model does NOT call set_emotion, infer one from the spoken
+        # reply via a tiny LLM classification so the face is always expressive.
+        # An explicit set_emotion tool call always takes priority over this.
+        self.declare_parameter('emotion_fallback', True)
 
         context_file: str = self.get_parameter('context_file').value
         fallback: str = self.get_parameter('system_prompt').value
@@ -96,6 +132,8 @@ class DialogueManager(Node):
         self._max_history: int = self.get_parameter('max_history').value
         self._tts_voice: str = self.get_parameter('tts_voice').value
         self._reply_suffix: str = self.get_parameter('reply_suffix').value
+        self._max_tool_iterations: int = self.get_parameter('max_tool_iterations').value
+        self._emotion_fallback: bool = self.get_parameter('emotion_fallback').value
 
         if context_file:
             self.get_logger().info(f'System prompt loaded from: {context_file}')
@@ -133,10 +171,13 @@ class DialogueManager(Node):
                 return
             self.get_logger().info('Waiting for /llm/request service...')
 
-    async def _call_llm(self, messages: list[dict]) -> tuple[str, list[str]]:
+    async def _call_llm(
+        self, messages: list[dict], tools: list[dict] | None = None
+    ) -> tuple[str, list[str]]:
         request = LLMChat.Request()
         request.messages_json = [json.dumps(m) for m in messages]
-        request.tools_json = [json.dumps(t) for t in AVAILABLE_TOOLS]
+        offered = AVAILABLE_TOOLS if tools is None else tools
+        request.tools_json = [json.dumps(t) for t in offered]
 
         event = asyncio.Event()
         result: list[LLMChat.Response | None] = [None]
@@ -173,42 +214,100 @@ class DialogueManager(Node):
 
             self.get_logger().info(f'[User]  "{user_text}"')
             self._history.append({'role': 'user', 'content': user_text})
+            self._truncate_history()
 
-            if len(self._history) > self._max_history:
-                self._history = self._history[-self._max_history:]
-                # Never start the window on an orphaned 'tool' result (a tool
-                # message must follow the assistant tool_call that produced it),
-                # or Ollama rejects the request.
-                while self._history and self._history[0]['role'] == 'tool':
-                    self._history.pop(0)
+            await self._handle_turn()
 
-            messages: list[dict] = list(self._history)
-            if self._reply_suffix and messages:
-                last = dict(messages[-1])
-                last['content'] = f'{last["content"]} {self._reply_suffix}'
-                messages[-1] = last
-            if self._system_prompt:
-                messages = [{'role': 'system', 'content': self._system_prompt}] + messages
+    async def _handle_turn(self) -> None:
+        """Run the LLM/tool loop for one user turn.
 
-            response_text, tool_calls = await self._call_llm(messages)
+        Each iteration: query the LLM, execute any tool calls, and record the
+        result in history. If the model called tools, loop again (with the tool
+        results now in context) so it can produce the spoken reply that goes with
+        the action. Stops once the model answers with no further tool calls.
+        """
+        spoken_text = ''
+        emotion_set = False
+        for _ in range(max(1, self._max_tool_iterations)):
+            response_text, tool_calls = await self._call_llm(self._build_messages())
             if not response_text and not tool_calls:
-                continue
+                break
 
             self._record_history(response_text, tool_calls)
+            self._truncate_history()
 
             self._pub.publish(AssistantResponse(
                 text=response_text,
                 tool_calls_json=tool_calls,
                 is_streaming=False,
             ))
-
-            self._route_tool_calls(tool_calls)
+            routed = self._route_tool_calls(tool_calls)
+            emotion_set = emotion_set or 'set_emotion' in routed
 
             if response_text:
-                self._tts_pub.publish(
-                    TTSRequest(text=response_text, voice=self._tts_voice)
-                )
-                self.get_logger().info(f'[ORION] "{response_text[:100]}..."')
+                spoken_text = response_text
+            if not tool_calls:
+                break  # final answer reached
+
+        # Hybrid expressiveness: if the model never set an emotion, infer one from
+        # the spoken reply so the face still reflects the mood. Publish it before
+        # the TTS so it shows while ORION talks.
+        if self._emotion_fallback and not emotion_set and spoken_text:
+            emotion = await self._classify_emotion(spoken_text)
+            if emotion and emotion != 'neutral':
+                self._publish_emotion(emotion)
+
+        if spoken_text:
+            self._tts_pub.publish(
+                TTSRequest(text=spoken_text, voice=self._tts_voice)
+            )
+            self.get_logger().info(f'[ORION] "{spoken_text[:100]}..."')
+
+    async def _classify_emotion(self, text: str) -> str | None:
+        """Infer one of the 8 emotions from a reply via a tiny LLM call (no tools)."""
+        messages = [
+            {'role': 'system', 'content': (
+                'Classify the emotion conveyed by the assistant line into exactly '
+                'one of: ' + ', '.join(EMOTIONS) + '. Reply with ONLY that single '
+                'word, lowercase, nothing else.'
+            )},
+            {'role': 'user', 'content': text},
+        ]
+        response, _ = await self._call_llm(messages, tools=[])
+        word = response.strip().lower().strip('.!"\'')
+        if word in EMOTIONS:
+            self.get_logger().info(f'[Emotion fallback] "{text[:40]}..." → {word}')
+            return word
+        self.get_logger().warning(f'Emotion fallback got unparseable: {response!r}')
+        return None
+
+    def _publish_emotion(self, emotion: str) -> None:
+        self._action_pub.publish(ActionCommand(
+            action_type='emotion',
+            payload_json=json.dumps({'emotion': emotion}),
+        ))
+        self.get_logger().info(f'[Action] emotion (fallback) → {emotion}')
+
+    def _truncate_history(self) -> None:
+        if len(self._history) <= self._max_history:
+            return
+        self._history = self._history[-self._max_history:]
+        # Never start the window on an orphaned 'tool' result (a tool message
+        # must follow the assistant tool_call that produced it), or Ollama
+        # rejects the request.
+        while self._history and self._history[0]['role'] == 'tool':
+            self._history.pop(0)
+
+    def _build_messages(self) -> list[dict]:
+        messages: list[dict] = list(self._history)
+        # Nudge brevity only on a real user turn (not on tool-result follow-ups).
+        if self._reply_suffix and messages and messages[-1]['role'] == 'user':
+            last = dict(messages[-1])
+            last['content'] = f'{last["content"]} {self._reply_suffix}'
+            messages[-1] = last
+        if self._system_prompt:
+            messages = [{'role': 'system', 'content': self._system_prompt}] + messages
+        return messages
 
     def _record_history(self, response_text: str, tool_calls: list[str]) -> None:
         """Append the assistant turn using the native tool-call protocol.
@@ -241,8 +340,13 @@ class DialogueManager(Node):
                 'content': 'ok',
             })
 
-    def _route_tool_calls(self, tool_calls: list[str]) -> None:
-        """Turn LLM tool calls into ActionCommand messages for orion_actions."""
+    def _route_tool_calls(self, tool_calls: list[str]) -> list[str]:
+        """Turn LLM tool calls into ActionCommand messages for orion_actions.
+
+        Returns the list of tool names actually routed (used to detect whether
+        the model already set an emotion this turn).
+        """
+        routed: list[str] = []
         for raw in tool_calls:
             try:
                 call = json.loads(raw)
@@ -261,9 +365,11 @@ class DialogueManager(Node):
                 payload_json=json.dumps(call.get('arguments', {})),
             )
             self._action_pub.publish(cmd)
+            routed.append(name)
             self.get_logger().info(
                 f'[Action] {name} → {action_type} {cmd.payload_json}'
             )
+        return routed
 
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()

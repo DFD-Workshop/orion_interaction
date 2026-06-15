@@ -68,6 +68,9 @@ class ActionExecutor(Node):
         # Arm joint limit (servo_conn_*_joint: ±pi/3 rad).
         self.declare_parameter('arm_limit', 1.0472)
 
+        # Emotion screen (ESP32 interaction board subscribes to this Int32 topic).
+        self.declare_parameter('emotion_topic', '/emotion/int')
+
         self._cmd_vel_topic: str = self.get_parameter('cmd_vel_topic').value
         self._publish_rate: float = self.get_parameter('publish_rate').value
         self._max_linear: float = self.get_parameter('max_linear').value
@@ -85,6 +88,9 @@ class ActionExecutor(Node):
         )
         self._right_arm_pub = self.create_publisher(
             Float64MultiArray, self.get_parameter('right_arm_topic').value, qos
+        )
+        self._emotion_pub = self.create_publisher(
+            Int32, self.get_parameter('emotion_topic').value, qos
         )
 
         self.create_subscription(ActionCommand, '/actions/command', self._command_cb, qos)
@@ -117,6 +123,7 @@ class ActionExecutor(Node):
             'move': self._handle_move,
             'stop': self._handle_stop,
             'arm': self._handle_arm,
+            'emotion': self._handle_emotion,
         }.get(msg.action_type)
 
         if handler is None:
@@ -155,6 +162,15 @@ class ActionExecutor(Node):
         self._stop_time = None
         self._cmd_vel_pub.publish(self._make_twist(0.0, 0.0))
         self.get_logger().info('[stop]')
+
+    def _handle_emotion(self, payload: dict) -> None:
+        name = str(payload.get('emotion', '')).lower()
+        index = _EMOTIONS.get(name)
+        if index is None:
+            self.get_logger().warning(f'Ignoring unknown emotion: {name!r}')
+            return
+        self._emotion_pub.publish(Int32(data=index))
+        self.get_logger().info(f'[emotion] {name} ({index})')
 
     def _handle_arm(self, payload: dict) -> None:
         for key, pub in (('left', self._left_arm_pub), ('right', self._right_arm_pub)):
