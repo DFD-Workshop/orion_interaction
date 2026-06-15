@@ -6,7 +6,7 @@ import rclpy
 from geometry_msgs.msg import TwistStamped
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, Int32
 
 from orion_interfaces.msg import ActionCommand
 
@@ -17,6 +17,19 @@ _DIRECTIONS = {
     'backward': (-1.0, 0.0),
     'left': (0.0, 1.0),
     'right': (0.0, -1.0),
+}
+
+# Emotion name -> screen index, mirrored exactly from the ESP32 firmware
+# (orion_interaction_micro_ros: emotions.hpp, epd_bitmap_allArray order).
+_EMOTIONS = {
+    'angry': 0,
+    'disgust': 1,
+    'fear': 2,
+    'happy': 3,
+    'neutral': 4,
+    'sad': 5,
+    'surprise': 6,
+    'wink': 7,
 }
 
 

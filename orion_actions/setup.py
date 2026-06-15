@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'action_executor = orion_actions.action_executor:main',
+            'gesture_sync = orion_actions.gesture_sync:main',
         ],
     },
 )

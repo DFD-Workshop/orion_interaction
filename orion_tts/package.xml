@@ -9,6 +9,7 @@
 
   <depend>rclpy</depend>
   <depend>orion_interfaces</depend>
+  <depend>std_msgs</depend>
   <depend>python3-numpy</depend>
   <depend>python3-scipy</depend>
   <depend>ffmpeg</depend>

@@ -10,6 +10,8 @@ import sounddevice as sd
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 
+from std_msgs.msg import Bool
+
 from orion_interfaces.msg import TTSRequest
 from orion_tts.backends import get_backend
 from orion_tts.backends.base import TTSBackend
@@ -70,6 +72,8 @@ class TTSNode(Node):
 
         qos = QoSProfile(depth=10)
         self.create_subscription(TTSRequest, '/tts/speak', self._speak_cb, qos)
+        # True while audio is playing, False when idle — drives gesture sync.
+        self._speaking_pub = self.create_publisher(Bool, '/tts/speaking', qos)
 
         # asyncio.Queue populated from ROS callbacks, drained by _process_loop
         self._queue: asyncio.Queue[TTSRequest] = asyncio.Queue()
@@ -107,10 +111,13 @@ class TTSNode(Node):
 
             self.get_logger().info(f'[TTS] "{text}"')
             # Playback is blocking — run it off the event loop, serialized by the queue.
+            self._speaking_pub.publish(Bool(data=True))
             try:
                 await loop.run_in_executor(None, self._play, audio, sample_rate)
             except Exception as exc:
                 self.get_logger().error(f'Playback error: {exc}')
+            finally:
+                self._speaking_pub.publish(Bool(data=False))
 
     def run(self) -> None:
         self._loop = asyncio.new_event_loop()
