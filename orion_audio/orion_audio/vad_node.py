@@ -7,6 +7,7 @@ import rclpy
 import webrtcvad
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
+from std_msgs.msg import Bool
 
 from orion_interfaces.msg import AudioData, AudioInfo
 
@@ -23,6 +24,10 @@ class VadNode(Node):
         self.declare_parameter('silence_ms', 800)
         self.declare_parameter('min_speech_ms', 100)
         self.declare_parameter('energy_threshold', 0.03)
+        # Half-duplex gating: ignore the mic while ORION speaks (and for a short
+        # tail afterwards) so it does not transcribe its own TTS through speakers.
+        self.declare_parameter('mute_while_speaking', True)
+        self.declare_parameter('mute_tail_ms', 500)
 
         self._sample_rate: int = self.get_parameter('sample_rate').value
         self._frame_ms: int = self.get_parameter('frame_duration_ms').value
@@ -41,6 +46,10 @@ class VadNode(Node):
         self._max_silence_frames: int = max(1, int(silence_ms / self._frame_ms))
         self._min_speech_frames: int = max(1, int(min_speech_ms / self._frame_ms))
 
+        self._mute_while_speaking: bool = self.get_parameter('mute_while_speaking').value
+        self._mute_tail: float = self.get_parameter('mute_tail_ms').value / 1000.0
+        self._mute_until: float = 0.0  # ROS time (sec) the mic stays muted until
+
         # State machine
         self._in_speech: bool = False
         self._speech_count: int = 0
@@ -53,15 +62,33 @@ class VadNode(Node):
         utterance_qos = QoSProfile(depth=10)
 
         self.create_subscription(AudioData, '/audio/raw', self._raw_cb, qos)
+        if self._mute_while_speaking:
+            self.create_subscription(Bool, '/tts/speaking', self._speaking_cb, utterance_qos)
         self._pub_info = self.create_publisher(AudioInfo, '/audio/utterance/info', utterance_qos)
         self._pub_data = self.create_publisher(AudioData, '/audio/utterance', utterance_qos)
 
         self.get_logger().info(
             f'VadNode ready — aggressiveness={aggressiveness}, '
-            f'silence={silence_ms} ms, min_speech={min_speech_ms} ms'
+            f'silence={silence_ms} ms, min_speech={min_speech_ms} ms, '
+            f'mute_while_speaking={self._mute_while_speaking}'
         )
 
+    def _now(self) -> float:
+        return self.get_clock().now().nanoseconds * 1e-9
+
+    def _speaking_cb(self, msg: Bool) -> None:
+        # While speaking: muted indefinitely. On stop: keep muted for the tail so
+        # the speaker buffer / room reverb does not leak into a new utterance.
+        self._mute_until = float('inf') if msg.data else self._now() + self._mute_tail
+
     def _raw_cb(self, msg: AudioData) -> None:
+        if self._now() < self._mute_until:
+            # ORION is talking — drop the frame and abandon any partial capture
+            # (it would otherwise contain ORION's own voice).
+            if self._in_speech:
+                self._reset()
+            return
+
         pcm_f32 = np.array(msg.data, dtype=np.float32)
         pcm_i16 = (pcm_f32 * 32768.0).clip(-32768, 32767).astype(np.int16)
         pcm_bytes = pcm_i16.tobytes()
